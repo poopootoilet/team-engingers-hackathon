@@ -1,0 +1,123 @@
+import json
+from pathlib import Path
+import streamlit as st
+
+DATA_PATH = Path(__file__).parent / "curriculum.json"
+
+st.set_page_config(page_title="GradePilot | GPA & CGPA Agent", page_icon="🎓", layout="wide")
+
+GRADE_POINTS = {
+    "A": 4.0, "B+": 3.5, "B": 3.0, "C+": 2.5,
+    "C": 2.0, "D+": 1.5, "D": 1.0, "F": 0.0,
+}
+
+@st.cache_data
+def load_curriculum():
+    with DATA_PATH.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+def weighted_gpa(rows):
+    """GPA = sum(grade points * credit units) / sum(credit units).
+    Only rows with a selected grade and positive credit units are counted.
+    """
+    graded = [r for r in rows if r.get("grade") in GRADE_POINTS and float(r.get("credits", 0)) > 0]
+    total_credits = sum(float(r["credits"]) for r in graded)
+    if not total_credits:
+        return None, 0.0, 0.0
+    weighted_points = sum(GRADE_POINTS[r["grade"]] * float(r["credits"]) for r in graded)
+    return weighted_points / total_credits, total_credits, weighted_points
+
+def calculate_cgpa(previous_cgpa, previous_credits, current_rows):
+    current_gpa, current_credits, current_points = weighted_gpa(current_rows)
+    prev_credits = float(previous_credits or 0)
+    if previous_cgpa is None or prev_credits <= 0:
+        return current_gpa, current_credits
+    combined_credits = prev_credits + current_credits
+    if combined_credits <= 0:
+        return None, 0
+    combined_points = float(previous_cgpa) * prev_credits + current_points
+    return combined_points / combined_credits, combined_credits
+
+def build_rows(modules, key_prefix):
+    rows = []
+    for i, module in enumerate(modules):
+        cols = st.columns([3, 1, 1.5])
+        cols[0].write(f"**{module['code']}** — {module['name']}")
+        cols[1].write(f"{module['credits']} CU")
+        grade = cols[2].selectbox(
+            "Grade",
+            ["Not entered"] + list(GRADE_POINTS.keys()),
+            key=f"{key_prefix}_{module['code']}_{i}",
+            label_visibility="collapsed",
+        )
+        rows.append({
+            "code": module["code"],
+            "name": module["name"],
+            "credits": float(module["credits"]),
+            "grade": None if grade == "Not entered" else grade,
+        })
+    return rows
+
+st.title("🎓 GradePilot")
+st.caption("A GPA/CGPA calculator prototype with curriculum lookup. Demo curriculum data is illustrative — verify official credits before relying on results.")
+
+curriculum = load_curriculum()
+institutions = sorted(curriculum.keys())
+institution = st.selectbox("Institution", institutions)
+courses = curriculum[institution]
+course = st.selectbox("Course / diploma", sorted(courses.keys()))
+semesters = courses[course]
+
+st.info("The selected course loads module names and credit units from the local curriculum database. For a real launch, replace the demo records with verified official curriculum data and include each institution's actual GPA rules.")
+
+semester_names = sorted(semesters.keys(), key=lambda s: int(s.split()[-1]) if s.split()[-1].isdigit() else s)
+semester = st.selectbox("Semester", semester_names)
+modules = semesters[semester]
+
+st.subheader(f"{semester} modules")
+st.write("Select a grade for each module. Leave modules unselected if you do not have results yet.")
+rows = build_rows(modules, f"{institution}_{course}_{semester}")
+
+with st.expander("Include results from previous semesters"):
+    use_previous = st.checkbox("I already have a previous CGPA")
+    previous_cgpa = None
+    previous_credits = 0.0
+    if use_previous:
+        c1, c2 = st.columns(2)
+        previous_cgpa = c1.number_input("Previous CGPA", min_value=0.0, max_value=4.0, value=2.0, step=0.01)
+        previous_credits = c2.number_input("Previously completed graded credit units", min_value=0.0, value=20.0, step=1.0)
+
+gpa, semester_credits, _ = weighted_gpa(rows)
+cgpa, total_credits = calculate_cgpa(previous_cgpa, previous_credits, rows) if use_previous else (gpa, semester_credits)
+
+st.divider()
+c1, c2, c3 = st.columns(3)
+c1.metric("Semester GPA", "—" if gpa is None else f"{gpa:.2f}")
+c2.metric("Graded credits this semester", f"{semester_credits:g}")
+c3.metric("Estimated CGPA", "—" if cgpa is None else f"{cgpa:.2f}")
+
+if gpa is not None:
+    st.caption("Calculation uses the demo 4.0 grade-point mapping shown in the code. Your institution may use a different scale, exclusions, repeats, pass/fail handling, or rounding rule.")
+
+st.subheader("Ask the academic planning helper")
+question = st.text_input(
+    "Example: What GPA do I need next semester to reach a CGPA of 2.5?",
+    placeholder="Ask about a target CGPA or change a grade..."
+)
+
+if st.button("Analyse target", type="primary"):
+    if not question.strip():
+        st.warning("Enter a question first.")
+    elif "reach" in question.lower() or "target" in question.lower():
+        if cgpa is None:
+            st.warning("Enter some grades first so I have a starting point.")
+        else:
+            st.write(f"Your current calculated CGPA is **{cgpa:.2f}** across **{total_credits:g}** graded credits.")
+            st.write("To calculate the GPA needed for a future target accurately, the agent also needs the target CGPA and the number of future graded credits. This starter prototype does not guess those values.")
+            st.write("For example, provide: `Target CGPA 2.5, current CGPA 2.1 over 40 credits, next semester 20 credits.`")
+    else:
+        st.write(f"I can help plan around your current calculated CGPA of **{'—' if cgpa is None else f'{cgpa:.2f}'}**. This starter version uses rule-based guidance; connect an LLM/agent workflow for free-form questions.")
+
+with st.expander("How the GPA math works"):
+    st.latex(r"\\text{GPA}=\\frac{\\sum(\\text{grade points}\\times\\text{credit units})}{\\sum\\text{credit units}}")
+    st.write("For CGPA, this prototype combines the previous CGPA weighted by previous graded credits with the current semester's weighted grade points. Use this only if it matches your institution's official calculation policy.")
